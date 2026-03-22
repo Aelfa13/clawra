@@ -5,15 +5,37 @@
 import json
 import os
 import sys
-import time
 import base64
-import hashlib
-import urllib.request
 from volcengine.visual.VisualService import VisualService
 
 # 配置
 CONFIG_PATH = os.path.expanduser("~/.openclaw/config/jimeng/config.json")
 REFERENCE_IMAGE = os.path.expanduser("~/.openclaw/workspace/clawra/skill/assets/clawra.jpg")
+
+# 固定的相似度提示词 - 严格保持人物一致性
+IDENTITY_PROMPT = (
+    "identical person, same face identity, face consistency locked, "
+    "MALE person only, MUST be male guy man, "
+    "【AGE】: mature face around 25 years old, youthful but mature features, NOT young-looking, "
+    "【FACE SHAPE】: oval face or heart-shaped face, pointed chin, smooth cheekbone lines, mature male proportions, "
+    "【EYES】: deep-set eyes, clear double eyelids, lively sparkling eyes with life, expressive, charming gaze, NOT dull eyes, "
+    "【NOSE】: straight and tall nasal bridge, round and delicate nose tip, narrow nostrils, "
+    "【LIPS】: full lips with clear Cupid's bow outline, healthy light pink color, "
+    "【JAWLINE】: sharp and defined jawline, obvious bone structure, male jawline, "
+    "【SKIN TONE】: fair porcelain skin with healthy natural glow, even skin tone, "
+    "【HAIR】: medium-short hair, shoulder-length hair, between short and medium-long, dark brown or black color, same hair length as reference photo, NEVER very short pixie hair, NEVER long hair, "
+    "【HAIRLINE】: consistent with reference, same hairline shape, "
+    "【BEARD】: clean shaved, NO beard at all, completely clean face, stubble-free, NEVER facial hair, "
+    "【SKIN TEXTURE】: delicate and smooth skin texture, nearly invisible pores, fine and smooth, "
+    "【OVERALL VIBE】: fresh youthful male aesthetic, around 25 years old, handsome guy with lively spirit, "
+    "identity consistency priority is the HIGHEST, "
+    "regardless of: angle changes, camera distance, lighting changes, pose changes, clothing changes, background changes, "
+    "face must remain completely consistent (90%+ similarity), "
+    "high realistic photography style, detailed skin texture, realistic lighting, natural look, "
+    "forbidden: female, forbidden: very short hair, forbidden: pixie cut, forbidden: long hair, forbidden: beard, forbidden: stubble, "
+    "forbidden: changing facial features, forbidden: changing skin tone, forbidden: person deformation, "
+    "forbidden: younger face, forbidden: dull expression"
+)
 
 def load_config():
     with open(CONFIG_PATH) as f:
@@ -43,59 +65,9 @@ def detect_mode(user_context):
 def build_prompt(user_context, mode):
     """构建提示词"""
     if mode == 'direct':
-        return f"{user_context}, a close-up selfie taken by herself, direct eye contact with the camera, looking straight into the lens, eyes centered and clearly visible, not a mirror selfie, phone held at arm's length, face fully visible"
+        return f"{user_context}, {IDENTITY_PROMPT}, close-up selfie, direct eye contact with the camera, looking straight into the lens, not a mirror selfie, phone held at arm's length, face fully visible"
     else:
-        return f"{user_context}, the person is taking a mirror selfie, full body shot"
-
-def download_image(url, filename=None):
-    """下载图片"""
-    if filename is None:
-        ext = os.path.splitext(url.split('?')[0])[1] or '.jpg'
-        hash_name = hashlib.md5(url.encode()).hexdigest()[:12]
-        filename = f"selfie_{hash_name}{ext}"
-    
-    local_path = f"/tmp/{filename}"
-    
-    if os.path.exists(local_path):
-        return local_path
-    
-    with urllib.request.urlopen(url, timeout=60) as response:
-        data = response.read()
-    
-    with open(local_path, 'wb') as f:
-        f.write(data)
-    
-    return local_path
-
-def wait_for_result(service, task_id, req_key, max_wait=180, interval=2):
-    """等待任务完成"""
-    for i in range(max_wait // interval):
-        time.sleep(interval)
-        
-        query_body = {
-            "req_key": req_key,
-            "task_id": task_id,
-            "req_json": json.dumps({"return_url": True})
-        }
-        
-        r2 = service.cv_sync2async_get_result(query_body)
-        
-        if r2.get("code") == 10000:
-            status = r2["data"]["status"]
-            
-            if status == "done":
-                image_urls = r2["data"].get("image_urls", [])
-                local_files = []
-                for i, url in enumerate(image_urls):
-                    try:
-                        local_path = download_image(url, f"selfie_{i}.jpg")
-                        local_files.append(local_path)
-                    except Exception as e:
-                        print(f"下载失败: {e}")
-                
-                return local_files
-    
-    return []
+        return f"{user_context}, {IDENTITY_PROMPT}, mirror selfie, full body shot"
 
 def generate_selfie(user_context):
     """生成自拍图片"""
@@ -109,55 +81,40 @@ def generate_selfie(user_context):
     if not os.path.exists(REFERENCE_IMAGE):
         raise Exception(f"参考图不存在: {REFERENCE_IMAGE}")
     
-    # 上传参考图获取URL (简化处理 - 直接用本地路径)
-    # 即梦需要URL，先上传到可访问的地方
-    print("提交图生图任务...")
-    
-    # 使用 jimeng_t2i_v40 + image_urls 参数
-    # 先上传参考图到即梦获取URL
-    # 这里简化处理，假设即梦支持本地路径或已经上传的URL
-    
-    # 读取参考图
+    # 读取参考图并转 base64
     with open(REFERENCE_IMAGE, 'rb') as f:
         img_data = f.read()
     img_base64 = base64.b64encode(img_data).decode()
     
-    # 尝试用 base64 方式
+    print("提交图生图任务...")
+    
     body = {
-        "req_key": "jimeng_img2img_v20",  # 尝试旧版API
+        "req_key": "jimeng_t2i_v40",
         "prompt": prompt,
         "image_base64": img_base64,
         "size": 4194304,
         "force_single": True
     }
     
-    result = service.cv_sync2async_submit_task(body)
+    result = service.cv_process(body)
     
     if result.get("code") != 10000:
-        # 尝试 t2i 模式
-        print(f"img2img 失败，尝试文生图模式...")
-        body = {
-            "req_key": "jimeng_t2i_v40",
-            "prompt": prompt,
-            "size": 4194304,
-            "force_single": True
-        }
-        result = service.cv_sync2async_submit_task(body)
+        raise Exception(f"提交失败: {result.get('message')}")
     
-    if result.get("code") != 10000:
-        raise Exception(f"提交失败: {result}")
+    # 获取图片数据
+    data = result.get("data", {})
+    b64_data = data.get("binary_data_base64", [])
     
-    task_id = result["data"]["task_id"]
-    print(f"任务ID: {task_id}")
-    print("等待生成...")
+    if not b64_data:
+        raise Exception("生成失败，未获取到图片数据")
     
-    req_key = result.get("data", {}).get("req_key", "jimeng_t2i_v40")
-    local_files = wait_for_result(service, task_id, req_key)
+    # 保存图片
+    img_bytes = base64.b64decode(b64_data[0])
+    filepath = f"/tmp/yectian_selfie_{os.getpid()}.jpg"
+    with open(filepath, 'wb') as f:
+        f.write(img_bytes)
     
-    if not local_files:
-        raise Exception("生成失败，未获取到图片")
-    
-    return local_files
+    return [filepath]
 
 def main():
     if len(sys.argv) < 2:
